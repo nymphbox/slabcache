@@ -103,10 +103,10 @@ impl<K: std::hash::Hash + Eq + Clone, V> Cache<K, V> {
     pub fn new(capacity: usize) -> Self {
         Cache {
             slab: Slab::with_capacity(capacity),
-            key_meta: HashMap::new(),
-            key_map: HashMap::new(),
+            key_meta: HashMap::with_capacity(capacity),
+            key_map: HashMap::with_capacity (capacity),
             usage: VecDeque::with_capacity(capacity),
-            usage_map: HashMap::new(),
+            usage_map: HashMap::with_capacity(capacity),
             statistics: Statistics::new(),
             capacity,
         }
