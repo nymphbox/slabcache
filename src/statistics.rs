@@ -25,14 +25,17 @@ impl Statistics {
         self.current_size = size;
     }
 
+    #[allow(dead_code)]
     pub fn get_hits(&self) -> usize {
         self.hits
     }
 
+    #[allow(dead_code)]
     pub fn get_misses(&self) -> usize {
         self.misses
     }
 
+    #[allow(dead_code)]
     pub fn get_current_size(&self) -> usize {
         self.current_size
     }

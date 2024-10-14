@@ -13,8 +13,6 @@ pub struct Metadata<K> {
     frequency: usize,
     /// The number of cache hits for the element
     hits: usize,
-    /// The number of cache misses for the element
-    misses: usize,
     /// The user-provided key for the element
     user_key: K,
 }
@@ -39,6 +37,12 @@ impl<'a, K, V> Iterator for CacheIterFrequency<'a, K, V> {
     }
 }
 
+pub enum SortOrder {
+    Ascending,
+    Descending,
+}
+
+
 impl<'a, K, V> Iterator for CacheIter<'a, K, V> {
     type Item = (&'a K, &'a V, &'a Metadata<K>);
 
@@ -50,8 +54,36 @@ impl<'a, K, V> Iterator for CacheIter<'a, K, V> {
         })
     }
 }
-
-struct Cache<K, V> {
+/// An efficient LRU in-memory cache based on a slab allocator.
+///
+/// # Examples
+///.```rust
+///
+/// use slabcache::Cache;
+///let mut cache = Cache::new(3);
+///
+/// cache.insert("foo", "bar");
+/// cache.insert("baz", "bar");
+/// cache.insert("foobar", "barbaz");
+///
+/// // Access elements
+/// let _ = cache.get("foo");
+/// let _ = cache.get("baz");
+///
+/// // Insert another element to force eviction of the LRU element
+///
+/// cache.insert("key", "value");
+///
+/// assert_eq!(cache.get("foo"), Some(&"bar"));
+/// assert_eq!(cache.get("baz"), Some(&"bar"));
+/// assert_eq!(cache.get("foobar"), None));
+/// assert_eq!(cache.get("key"), Some(&"value"));
+///
+/// // Iterate over the cache elements by access frequency
+/// for (key, value, metadata) in cache.iter_frequency(SortOrder::Ascending) {
+///     println!("Key: {}, Value: {}, Frequency: {}", key, value, metadata.frequency);
+/// }```
+pub struct Cache<K, V> {
     /// The slab allocator used as the storage engine for the cache
     slab: Slab<V>,
     /// A map from the index of an element in the slab to its metadata
@@ -67,8 +99,6 @@ struct Cache<K, V> {
     /// Statistics about the cache
     statistics: Statistics,
 }
-
-
 impl<K: std::hash::Hash + Eq + Clone, V> Cache<K, V> {
     pub fn new(capacity: usize) -> Self {
         Cache {
@@ -91,7 +121,6 @@ impl<K: std::hash::Hash + Eq + Clone, V> Cache<K, V> {
                 last_accessed: 0,
                 frequency: 0,
                 hits: 0,
-                misses: 0,
                 user_key: key.clone(),
             },
         );
@@ -106,26 +135,33 @@ impl<K: std::hash::Hash + Eq + Clone, V> Cache<K, V> {
                 self.key_meta.remove(&key);
             }
         }
+        self.statistics.update_size(self.slab.len());
         key
     }
 
 
     /// Get a value from the cache and update its access time and frequency
     pub fn get(&mut self, key: K) -> Option<&V> {
-        let usize_key = *self.key_map.get(&key)?;
-        if let Some(meta) = self.key_meta.get_mut(&usize_key) {
-            meta.last_accessed = Utc::now().timestamp_micros();
-            meta.frequency += 1;
-            self.statistics.hit();
-        } else {
-            self.statistics.miss();
+        match self.key_map.get(&key) {
+            Some(&usize_key) => {
+                if let Some(meta) = self.key_meta.get_mut(&usize_key) {
+                    meta.last_accessed = Utc::now().timestamp_micros();
+                    meta.frequency += 1;
+                    meta.hits += 1;
+                    self.statistics.hit();
+                }
+                if let Some(&position) = self.usage_map.get(&usize_key) {
+                    let k = self.usage.remove(position)?;
+                    self.usage.push_back(k);
+                    self.usage_map.insert(usize_key, self.usage.len() - 1);
+                }
+                self.slab.get(usize_key)
+            }
+            None => {
+                self.statistics.miss();
+                None
+            }
         }
-        if let Some(&position) = self.usage_map.get(&usize_key) {
-            let k = self.usage.remove(position).unwrap();
-            self.usage.push_back(k);
-            self.usage_map.insert(usize_key, self.usage.len() - 1);
-        }
-        self.slab.get(usize_key)
     }
 
 
@@ -147,10 +183,10 @@ impl<K: std::hash::Hash + Eq + Clone, V> Cache<K, V> {
 
 
     /// Returns an iterator over the cache in order of access frequency
-    pub fn iter_frequency(&self, ascending: bool) -> CacheIterFrequency<K, V> {
+    pub fn iter_frequency(&self, order: SortOrder) -> CacheIterFrequency<K, V> {
         let mut keys: Vec<usize> = self.key_meta.keys().cloned().collect();
         keys.sort_by_key(|k| self.key_meta.get(k).unwrap().frequency);
-        if !ascending {
+        if let SortOrder::Descending = order {
             keys.reverse();
         }
         CacheIterFrequency {
@@ -163,8 +199,6 @@ impl<K: std::hash::Hash + Eq + Clone, V> Cache<K, V> {
 
 
 #[cfg(test)]
-
-
 #[test]
 fn test_cache_basic() {
     let mut cache = Cache::new(10);
@@ -220,12 +254,49 @@ fn test_frequency_iter() {
     let _ = cache.get(key2);
     let _ = cache.get(key3);
 
-    let ascending_keys: Vec<&str> = cache.iter_frequency(true).map(|(k, _, _)| k).cloned().collect();
-    let descending_keys: Vec<&str> = cache.iter_frequency(false).map(|(k, _, _)| k).cloned().collect();
+    let ascending_keys: Vec<&str> = cache.iter_frequency(SortOrder::Ascending).map(|(k, _, _)| k).cloned().collect();
+    let descending_keys: Vec<&str> = cache.iter_frequency(SortOrder::Descending).map(|(k, _, _)| k).cloned().collect();
     assert_eq!(ascending_keys, vec!["key3", "key2", "key1"]);
     assert_eq!(descending_keys, vec!["key1", "key2", "key3"]);
+}
+#[test]
+fn test_statistics() {
+    let mut cache = Cache::new(3);
 
+    cache.insert("key1", "value1");
+    cache.insert("key2", "value2");
+    cache.insert("key3", "value3");
 
+    cache.get("key1");
+    cache.get("key2");
+    cache.get("key4"); // Miss
 
+    assert_eq!(cache.statistics.get_hits(), 2);
+    assert_eq!(cache.statistics.get_misses(), 1);
+    assert_eq!(cache.statistics.get_current_size(), 3);
+}
+#[test]
+fn test_metadata_fields() {
+    let mut cache = Cache::new(3);
+
+    let key1 = cache.insert("key1", "value1");
+    let key2 = cache.insert("key2", "value2");
+
+    cache.get(key1);
+    cache.get(key1);
+    cache.get(key2);
+    // Force a miss
+    cache.get("key4");
+
+    let meta1 = cache.key_meta.get(&cache.key_map[&key1]).unwrap();
+    let meta2 = cache.key_meta.get(&cache.key_map[&key2]).unwrap();
+
+    assert!(meta1.last_accessed > 0);
+    assert_eq!(meta1.frequency, 2);
+    assert_eq!(meta1.hits, 2);
+
+    assert!(meta2.last_accessed > 0);
+    assert_eq!(meta2.frequency, 1);
+    assert_eq!(meta2.hits, 1);
 }
 
