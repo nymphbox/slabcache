@@ -1,4 +1,4 @@
-mod store;
+mod cache;
 mod statistics;
 
-pub use store::{Cache, SortOrder};
+pub use cache::{Cache, SortOrder};
